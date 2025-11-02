@@ -3,15 +3,34 @@
 Pokemon image processing pipeline.
 '''
 
-from PIL import Image, ImageOps, ImageFilter, ImageEnhance
-from pika_banner import print_pikachu
-from tqdm import tqdm
 import requests
 import time
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from PIL import Image, ImageOps, ImageFilter, ImageEnhance
+from pika_banner import print_pikachu
+from tqdm import tqdm
 
 
-def download_pokemon(n=150, dir_name='pokemon_dataset'):
+def _fetch_pokemon(base_url, dir_name, index, timeout=10):
+    '''
+    Descarga una imagen individual de Pokémon.
+    '''
+
+    file_name = f'{index:03d}.png'
+    url = f'{base_url}/{file_name}'
+
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+
+    img_path = os.path.join(dir_name, file_name)
+    with open(img_path, 'wb') as f:
+        f.write(response.content)
+
+    return file_name
+
+
+def download_pokemon(n=150, dir_name='pokemon_dataset', workers=8):
     '''
     Descarga las imágenes de los primeros n Pokemones.
     '''
@@ -21,21 +40,25 @@ def download_pokemon(n=150, dir_name='pokemon_dataset'):
 
     print(f'\nDescargando {n} pokemones...\n')
     start_time = time.time()
-    
-    for i in tqdm(range(1, n + 1), desc='Descargando', unit='img'):
-        file_name = f'{i:03d}.png'
-        url = f'{base_url}/{file_name}'
-        
-        try:
-            response = requests.get(url)
-            response.raise_for_status()
-            
-            img_path = os.path.join(dir_name, file_name)
-            with open(img_path, 'wb') as f:
-                f.write(response.content)
-                
-        except requests.exceptions.RequestException as e:
-            tqdm.write(f'  Error descargando {file_name}: {e}')
+    indices = range(1, n + 1)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_fetch_pokemon, base_url, dir_name, index): index
+            for index in indices
+        }
+
+        for future in tqdm(
+            as_completed(futures),
+            total=len(futures),
+            desc='Descargando',
+            unit='img'
+        ):
+            try:
+                future.result()
+            except Exception as e:
+                idx = futures[future]
+                tqdm.write(f'  Error descargando {idx:03d}.png: {e}')
     
     total_time = time.time() - start_time
     print(f'  Descarga completada en {total_time:.2f} segundos')
