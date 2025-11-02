@@ -1,0 +1,9 @@
+Primera estrategia: Ahora se usa un Threadpoolexecutor con hasta 8 hilos para lanzar varias
+descargas en paralelo.
+Segunda estrategia:  Ahora cada imagen delega un worker de processpoolexcutor, apoyandose en el 
+nuevo helper processimage para encapsular las transformaciones.
+Tercera estrategia: Se implemento una etapa de pipeline que cordina descargas y procesado en paralelo con hilos
+y una cola compartida.
+Cuarta estrategia: ahora pipeline_pokemon baja cada sprite a bytes, los pasa por queue
+a una process poolexecutor que usa processimagesfrombutes, para aplicar fultros directamente
+sobre bytiesio, y solo vuevle a escribir en el disco cuanto se graba el resultado.
