@@ -3,6 +3,7 @@
 Pokemon image processing pipeline.
 '''
 
+import io
 import requests
 import time
 import os
@@ -30,6 +31,20 @@ def _fetch_pokemon(base_url, dir_name, index, timeout=10):
         f.write(response.content)
 
     return file_name
+
+
+def _fetch_pokemon_bytes(base_url, index, timeout=10):
+    '''
+    Descarga una imagen individual y devuelve el contenido en memoria.
+    '''
+
+    file_name = f'{index:03d}.png'
+    url = f'{base_url}/{file_name}'
+
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+
+    return file_name, response.content
 
 
 def download_pokemon(n=150, dir_name='pokemon_dataset', workers=8):
@@ -97,6 +112,37 @@ def _process_image(task):
     return image
 
 
+def _process_image_from_bytes(task):
+    '''
+    Procesa una imagen recibida en memoria y la guarda en disco.
+    '''
+
+    image_name, image_bytes, dir_origin, dir_name, persist_raw = task
+
+    if persist_raw:
+        origin_path = os.path.join(dir_origin, image_name)
+        with open(origin_path, 'wb') as raw_file:
+            raw_file.write(image_bytes)
+
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        img = img.convert('RGB')
+
+        img = img.filter(ImageFilter.GaussianBlur(radius=10))
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(1.5)
+        img = img.filter(ImageFilter.EDGE_ENHANCE_MORE)
+        img_inv = ImageOps.invert(img)
+        img_inv = img_inv.filter(ImageFilter.GaussianBlur(radius=5))
+        width, height = img_inv.size
+        img_inv = img_inv.resize((width * 2, height * 2), Image.LANCZOS)
+        img_inv = img_inv.resize((width, height), Image.LANCZOS)
+
+        saving_path = os.path.join(dir_name, image_name)
+        img_inv.save(saving_path, quality=95)
+
+    return image_name
+
+
 def process_pokemon(dir_origin='pokemon_dataset', dir_name='pokemon_processed', workers=None):
     '''
     Procesa las imágenes aplicando múltiples transformaciones.
@@ -148,7 +194,8 @@ def pipeline_pokemon(
     dir_name='pokemon_processed',
     download_workers=8,
     process_workers=None,
-    queue_size=32
+    queue_size=32,
+    persist_raw=False
 ):
     '''
     Descarga y procesa imágenes en paralelo utilizando colas y pools.
@@ -186,9 +233,9 @@ def pipeline_pokemon(
     process_map = {}
 
     pipeline_start = time.time()
-    download_start = time.time()
     processing_started_at = None
     sentinel = object()
+    download_start = None
 
     with ProcessPoolExecutor(max_workers=process_workers) as process_pool:
 
@@ -196,15 +243,19 @@ def pipeline_pokemon(
             nonlocal processing_started_at
 
             while True:
-                image_name = queue.get()
-                if image_name is sentinel:
+                item = queue.get()
+                if item is sentinel:
                     queue.task_done()
                     break
 
                 if processing_started_at is None:
                     processing_started_at = time.time()
 
-                future = pool.submit(_process_image, (dir_origin, dir_name, image_name))
+                image_name, image_bytes = item
+                future = pool.submit(
+                    _process_image_from_bytes,
+                    (image_name, image_bytes, dir_origin, dir_name, persist_raw)
+                )
                 process_futures.append(future)
                 process_map[future] = image_name
                 queue.task_done()
@@ -214,7 +265,7 @@ def pipeline_pokemon(
 
         with ThreadPoolExecutor(max_workers=download_workers) as download_pool:
             download_futures = {
-                download_pool.submit(_fetch_pokemon, base_url, dir_origin, index): index
+                download_pool.submit(_fetch_pokemon_bytes, base_url, index): index
                 for index in indices
             }
 
@@ -226,13 +277,19 @@ def pipeline_pokemon(
             ):
                 index = download_futures[future]
                 try:
-                    file_name = future.result()
-                    queue.put(file_name)
+                    if download_start is None:
+                        download_start = time.time()
+
+                    file_name, image_bytes = future.result()
+                    queue.put((file_name, image_bytes))
                 except Exception as e:
                     download_errors.append(f'{index:03d}.png: {e}')
                     tqdm.write(f'  Error descargando {index:03d}.png: {e}')
 
-        download_time = time.time() - download_start
+        if download_start is None:
+            download_time = 0.0
+        else:
+            download_time = time.time() - download_start
 
         queue.put(sentinel)
         queue.join()
